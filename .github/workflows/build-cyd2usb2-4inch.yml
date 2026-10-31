@@ -1,0 +1,68 @@
+name: Build GhostESP - CYD2USB2.4Inch
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional release tag to annotate the build
+        required: false
+        default: ""
+
+jobs:
+  build-cyd2usb2-4inch:
+    name: Build CYD2USB2.4Inch firmware
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up ESP-IDF
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.4.1
+          target: esp32
+
+      - name: Configure build for CYD2USB2.4Inch
+        shell: bash
+        run: |
+          set -e
+          cp configs/sdkconfig.CYD2USB2.4Inch sdkconfig
+          idf.py set-target esp32
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          set -e
+          idf.py build
+
+      - name: Package firmware artifact
+        shell: bash
+        run: |
+          set -e
+          mkdir -p release
+          find build -type f \( -name "*.bin" -o -name "*.elf" \) -exec cp {} release/ \;
+          if [ -z "$(ls -A release 2>/dev/null)" ]; then
+            echo "No build artifacts were generated." >&2
+            exit 1
+          fi
+          chmod -R 0644 release/*
+          zip -j "CYD2USB2.4Inch.zip" release/*
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CYD2USB2.4Inch
+          path: CYD2USB2.4Inch.zip
+
+      - name: Optional GitHub release tag
+        if: ${{ github.event.inputs.release_tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          files: CYD2USB2.4Inch.zip
