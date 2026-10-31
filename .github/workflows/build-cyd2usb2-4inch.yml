@@ -22,23 +22,122 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Set up ESP-IDF
-        uses: espressif/esp-idf-ci-action@v1
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          esp_idf_version: v5.4.1
-          target: esp32
+          python-version: "3.10"
+
+      - name: Install ESP-IDF dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget git flex bison gperf python3-pip python3-setuptools cmake ninja-build ccache libffi-dev libssl-dev dfu-util
+
+      - name: Install ESP-IDF v6.1
+        shell: bash
+        run: |
+          git clone -b v6.1 --depth 1 --recursive https://github.com/espressif/esp-idf.git ~/esp-idf
+          ~/esp-idf/install.sh
 
       - name: Configure build for CYD2USB2.4Inch
         shell: bash
         run: |
           set -e
+          rm -f sdkconfig sdkconfig.defaults
+          cp configs/sdkconfig.CYD2USB2.4Inch sdkconfig.defaults
           cp configs/sdkconfig.CYD2USB2.4Inch sdkconfig
-          idf.py set-target esp32
+          printf "\n# CONFIG_FATFS_USE_DYN_BUFFERS is not set\n" >> sdkconfig.defaults
+          printf "\n# CONFIG_FATFS_USE_DYN_BUFFERS is not set\n" >> sdkconfig
+          printf "\n# CONFIG_ESP_GDBSTUB_ENABLED is not set\n" >> sdkconfig.defaults
+          printf "\n# CONFIG_ESP_GDBSTUB_ENABLED is not set\n" >> sdkconfig
+
+      - name: Set up ESP-IDF environment
+        shell: bash
+        run: |
+          . ~/esp-idf/export.sh
+          export IDF_TARGET=esp32
+          echo "IDF_TARGET=esp32" >> $GITHUB_ENV
+
+      - name: Preserve custom Wi-Fi cache buffer count on ESP-IDF 6.1
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          defaults = Path("sdkconfig.defaults").read_text(encoding="utf-8")
+          match = re.search(r"^CONFIG_ESP_WIFI_CACHE_TX_BUFFER_NUM=(\d+)\s*$", defaults, re.MULTILINE)
+          if not match or match.group(1) == "32":
+              raise SystemExit(0)
+          value = match.group(1)
+          kconfig = Path.home() / "esp-idf/components/esp_wifi/Kconfig"
+          source = kconfig.read_text(encoding="utf-8")
+          pattern = re.compile(
+              r"(config ESP_WIFI_CACHE_TX_BUFFER_NUM\n"
+              r"(?:(?!\n\s*config ).)*?\n\s*default )32(\n)",
+              re.DOTALL,
+          )
+          source, count = pattern.subn(
+              rf"\g<1>{value}\g<2>",
+              source,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("ESP-IDF Wi-Fi cache buffer Kconfig layout changed")
+          kconfig.write_text(source, encoding="utf-8")
+          PY
+
+      - name: Patch ESP-IDF gdbstub compatibility
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          idf = Path.home() / "esp-idf"
+          gdbstub = idf / "components/esp_gdbstub/src/gdbstub.c"
+          source = gdbstub.read_text(encoding="utf-8")
+          helper_guard = re.compile(
+              r"#if\s*\(?\s*CONFIG_ESP_SYSTEM_GDBDBSTUB_RUNTIME\s*\|\|\s*CONFIG_ESP_GDBSTUB_SUPPORT_TASKS\s*\)?"
+          )
+          if helper_guard.search(source):
+              source = helper_guard.sub("#if 1", source)
+          gdbstub.write_text(source, encoding="utf-8")
+
+          if os.environ["IDF_TARGET"] in {"esp32", "esp32s2", "esp32s3"}:
+              xtensa = idf / "components/esp_gdbstub/src/port/xtensa/gdbstub_xtensa.c"
+              source = xtensa.read_text(encoding="utf-8")
+              source = source.replace("portNUM_PROCESSORS", "CONFIG_FREERTOS_NUMBER_OF_CORES")
+              source, tcb_count = re.subn(
+                  r"const\s+StaticTask_t\s*\*\s*tcb\s*;",
+                  "void *tcb = NULL;",
+                  source,
+              )
+              source, lookup_count = re.subn(
+                  r"tcb\s*=\s*esp_gdbstub_find_tcb_by_frame\s*\(frame\)\s*;",
+                  "",
+                  source,
+              )
+              source, call_count = re.subn(
+                  r"#if\s+(?:XCHAL_HAVE_FP|0)\s+(?=gdbstub_write_fpu_regs\s*\()",
+                  "#if 0\n    ",
+                  source,
+              )
+              if tcb_count != lookup_count or tcb_count not in {0, 1}:
+                  raise SystemExit(
+                      f"unexpected Xtensa FPU patch counts: tcb={tcb_count}, lookup={lookup_count}"
+                  )
+              xtensa.write_text(source, encoding="utf-8")
+          PY
 
       - name: Build firmware
         shell: bash
         run: |
           set -e
+          . ~/esp-idf/export.sh
+          export IDF_TARGET=esp32
+          idf.py clean
           idf.py build
 
       - name: Package firmware artifact
