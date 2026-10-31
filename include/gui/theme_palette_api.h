@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define THEME_PALETTE_THEME_COUNT 21
+#define THEME_PALETTE_THEME_COUNT 23
 #define THEME_PALETTE_SLOT_COUNT 6
 
 typedef enum {
